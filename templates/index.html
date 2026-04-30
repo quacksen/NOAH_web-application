@@ -4,192 +4,131 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="refresh" content="60">
-    <title>NOAH | Atmospheric Dashboard</title>
-    
-    <!-- Professional Styling Assets -->
+    <title>NOAH | Live Dashboard</title>
     <link href="https://jsdelivr.net" rel="stylesheet">
     <link href="https://googleapis.com" rel="stylesheet">
-    
     <style>
-        /* Open-Meteo Dark Theme Palette */
-        body { 
-            background-color: #0b0e14; 
-            color: #e0e0e0; 
-            font-family: 'Inter', sans-serif; 
-            overflow-x: hidden; 
-        }
-        
-        .dashboard-header { 
-            border-bottom: 1px solid #1f2937; 
-            padding: 20px 0; 
-            margin-bottom: 30px; 
-            background: #0b0e14;
-        }
-
-        .station-title { 
-            font-family: 'Orbitron', sans-serif; 
-            letter-spacing: 2px; 
-            color: #8b949e; 
-            font-size: 0.9rem; 
-            font-weight: 700;
-        }
-        
-        /* Gauge Card Styling */
-        .gauge-card { 
-            background: #0b0e14; /* Matched to background for seamless look */
-            border: 1px solid #1f2937; 
-            border-radius: 12px; 
-            padding: 25px; 
-            text-align: center;
-            height: 100%;
-        }
-        
-        .gauge-label { 
-            font-size: 0.75rem; 
-            text-transform: uppercase; 
-            color: #8b949e; 
-            letter-spacing: 2px; 
-            margin-bottom: 20px; 
-            font-weight: 600;
-        }
-        
-        .gauge-value { 
-            font-family: 'Inter', sans-serif; 
-            font-size: 1.8rem; 
-            margin-top: -35px; 
-            color: #ffffff;
-            font-weight: 400;
-        }
-        
-        .gauge-desc { 
-            font-size: 0.85rem; 
-            font-weight: 700; 
-            margin-top: 10px; 
-            letter-spacing: 1px;
-            text-transform: uppercase;
-        }
-
-        .metadata {
-            font-size: 0.75rem;
-            color: #8b949e;
-            margin-top: 4px;
-        }
-
-        /* Color States */
-        .text-mild { color: #51cf66; }
-        .text-comfortable { color: #339af0; }
-        .text-calm { color: #51cf66; }
-
-        .container { max-width: 1100px; }
+        body { background-color: #0b0e14; color: #e0e0e0; font-family: 'Inter', sans-serif; }
+        .gauge-card { background: #0b0e14; border: 1px solid #1f2937; border-radius: 12px; padding: 25px; text-align: center; }
+        .gauge-value { font-size: 1.8rem; margin-top: -35px; color: #ffffff; }
+        .gauge-label { font-size: 0.75rem; text-transform: uppercase; color: #8b949e; letter-spacing: 2px; }
     </style>
 </head>
 <body>
-
-    <div class="dashboard-header">
-        <div class="container d-flex justify-content-between align-items-center">
-            <div class="station-title">✦ HAZARD & ATMOSPHERIC GAUGES</div>
-            <div class="text-end">
-                <div class="small text-muted" style="font-size: 0.7rem;">SRC: NOTECARD / CULLOWHEE</div>
-            </div>
-        </div>
-    </div>
-
-    <div class="container">
+    <div class="container mt-5">
         {% if data %}
         <div class="row g-4">
-            
-            <!-- AIR TEMPERATURE -->
             <div class="col-md-4">
                 <div class="gauge-card">
-                    <div class="gauge-label">Air Temperature</div>
+                    <div class="gauge-label">Temperature</div>
                     <div id="temp-gauge" style="height: 160px;"></div>
-                    <div class="gauge-value">{{ data.temp_f }}°F</div>
-                    <div class="gauge-desc text-mild">Mild</div>
-                    <div class="metadata">Dewpoint: 32.5°F</div>
+                    <div class="gauge-value">{{ data.temp_f | default(0) }}°F</div>
                 </div>
             </div>
-
-            <!-- HUMIDITY -->
             <div class="col-md-4">
                 <div class="gauge-card">
                     <div class="gauge-label">Humidity</div>
                     <div id="hum-gauge" style="height: 160px;"></div>
-                    <div class="gauge-value">{{ data.humidity }}%</div>
-                    <div class="gauge-desc text-comfortable">Comfortable</div>
-                    <div class="metadata">Dewpoint: 32.5°F</div>
+                    <div class="gauge-value">{{ data.humidity | default(0) }}%</div>
                 </div>
             </div>
-
-            <!-- WIND SPEED -->
             <div class="col-md-4">
                 <div class="gauge-card">
                     <div class="gauge-label">Wind Speed</div>
                     <div id="wind-gauge" style="height: 160px;"></div>
-                    <div class="gauge-value">{{ data.wind_speed_mph or 0 }} <small style="font-size: 0.9rem">mph</small></div>
-                    <div class="gauge-desc text-calm">Calm</div>
-                    <div class="metadata">Gust: {{ (data.wind_speed_mph or 0) * 1.2 }} mph</div>
+                    <div class="gauge-value">{{ data.wind_speed_mph | default(0) }} mph</div>
                 </div>
             </div>
-
         </div>
         {% else %}
         <div class="text-center py-5">
-            <div class="spinner-border text-secondary mb-3"></div>
-            <p class="text-muted">Waiting for data from NOAH sensor network...</p>
+            <h4 class="text-muted">No Data Found</h4>
+            <p>Ensure your Notecard is sending data to the 'noah_sensor_data' collection.</p>
         </div>
         {% endif %}
     </div>
 
-    <!-- Gauge Rendering Scripts -->
     <script src="https://cloudflare.com"></script>
     <script src="https://cloudflare.com"></script>
-    
     <script>
         {% if data %}
         document.addEventListener("DOMContentLoaded", function() {
-            
-            // Shared styling to match the thin-arc "Open-Meteo" look
             var config = {
-                gaugeWidthScale: 0.1,  // Ultra-thin line
-                pointer: true,
-                pointerOptions: {
-                    toplength: -15,    // Needle touches the edge
-                    bottomlength: 10,
-                    bottomwidth: 6,
-                    color: '#51cf66',  // Neon green needle
-                    stroke: '#0b0e14',
-                    stroke_width: 2
-                },
-                gaugeColor: "#1c2128", // Very dark track
-                hideValue: true,       // Use our custom div for the value instead
-                shadowOpacity: 0,
-                startAnimationTime: 1000,
-                refreshAnimationTime: 500
+                gaugeWidthScale: 0.1, pointer: true, gaugeColor: "#1c2128",
+                hideValue: true, shadowOpacity: 0,
+                pointerOptions: { toplength: -15, color: '#51cf66' }
             };
+            new JustGage({ id: "temp-gauge", value: {{ data.temp_f | default(0) }}, min: 0, max: 110, levelColors: ["#339af0", "#51cf66", "#ff6b6b"], ...config });
+            new JustGage({ id: "hum-gauge", value: {{ data.humidity | default(0) }}, min: 0, max: 100, levelColors: ["#339af0"], ...config });
+            new JustGage({ id: "wind-gauge", value: {{ data.wind_speed_mph | default(0) }}, min: 0, max: 60, levelColors: ["#51cf66"], ...config });
+        });
+        {% endif %}
+    </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="60">
+    <title>NOAH | Live Dashboard</title>
+    <link href="https://jsdelivr.net" rel="stylesheet">
+    <link href="https://googleapis.com" rel="stylesheet">
+    <style>
+        body { background-color: #0b0e14; color: #e0e0e0; font-family: 'Inter', sans-serif; }
+        .gauge-card { background: #0b0e14; border: 1px solid #1f2937; border-radius: 12px; padding: 25px; text-align: center; }
+        .gauge-value { font-size: 1.8rem; margin-top: -35px; color: #ffffff; }
+        .gauge-label { font-size: 0.75rem; text-transform: uppercase; color: #8b949e; letter-spacing: 2px; }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        {% if data %}
+        <div class="row g-4">
+            <div class="col-md-4">
+                <div class="gauge-card">
+                    <div class="gauge-label">Temperature</div>
+                    <div id="temp-gauge" style="height: 160px;"></div>
+                    <div class="gauge-value">{{ data.temp_f | default(0) }}°F</div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="gauge-card">
+                    <div class="gauge-label">Humidity</div>
+                    <div id="hum-gauge" style="height: 160px;"></div>
+                    <div class="gauge-value">{{ data.humidity | default(0) }}%</div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="gauge-card">
+                    <div class="gauge-label">Wind Speed</div>
+                    <div id="wind-gauge" style="height: 160px;"></div>
+                    <div class="gauge-value">{{ data.wind_speed_mph | default(0) }} mph</div>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="text-center py-5">
+            <h4 class="text-muted">No Data Found</h4>
+            <p>Ensure your Notecard is sending data to the 'noah_sensor_data' collection.</p>
+        </div>
+        {% endif %}
+    </div>
 
-            var gTemp = new JustGage({
-                id: "temp-gauge", 
-                value: {{ data.temp_f }}, 
-                min: 0, max: 110,
-                levelColors: ["#339af0", "#51cf66", "#fcc419", "#ff6b6b"],
-                ...config
-            });
-
-            var gHum = new JustGage({
-                id: "hum-gauge", 
-                value: {{ data.humidity }}, 
-                min: 0, max: 100,
-                levelColors: ["#339af0"], 
-                ...config
-            });
-
-            var gWind = new JustGage({
-                id: "wind-gauge", 
-                value: {{ data.wind_speed_mph or 0 }}, 
-                min: 0, max: 60,
-                levelColors: ["#51cf66"], 
-                ...config
-            });
+    <script src="https://cloudflare.com"></script>
+    <script src="https://cloudflare.com"></script>
+    <script>
+        {% if data %}
+        document.addEventListener("DOMContentLoaded", function() {
+            var config = {
+                gaugeWidthScale: 0.1, pointer: true, gaugeColor: "#1c2128",
+                hideValue: true, shadowOpacity: 0,
+                pointerOptions: { toplength: -15, color: '#51cf66' }
+            };
+            new JustGage({ id: "temp-gauge", value: {{ data.temp_f | default(0) }}, min: 0, max: 110, levelColors: ["#339af0", "#51cf66", "#ff6b6b"], ...config });
+            new JustGage({ id: "hum-gauge", value: {{ data.humidity | default(0) }}, min: 0, max: 100, levelColors: ["#339af0"], ...config });
+            new JustGage({ id: "wind-gauge", value: {{ data.wind_speed_mph | default(0) }}, min: 0, max: 60, levelColors: ["#51cf66"], ...config });
         });
         {% endif %}
     </script>
