@@ -1,67 +1,105 @@
 from flask import Flask, render_template_string
 from google.cloud import firestore
-from datetime import datetime
 import os
 import logging
 
 app = Flask(__name__)
 
-# IMPORTANT: Matching your ingest function's specific database
+# Initialize Firestore with your specific database
 db = firestore.Client(database="cullowhee")
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NOAH | Cullowhee Weather</title>
+    <link href="https://jsdelivr.net" rel="stylesheet">
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background: #f0f2f5; color: #333; }
-        .container { max-width: 1200px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 10px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { padding: 12px; border: 1px solid #dee2e6; text-align: left; }
-        th { background-color: #1a73e8; color: white; position: sticky; top: 0; }
-        tr:nth-child(even) { background-color: #f8f9fa; }
-        tr:hover { background-color: #e9ecef; }
-        .status-bar { margin-bottom: 20px; font-size: 0.9em; color: #666; }
+        body { background-color: #f8f9fa; font-family: 'Inter', sans-serif; }
+        .navbar { background-color: #0d6efd; color: white; margin-bottom: 2rem; }
+        .card-stat { border: none; border-radius: 15px; transition: transform 0.2s; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .card-stat:hover { transform: translateY(-5px); }
+        .stat-value { font-size: 2rem; font-weight: bold; color: #0d6efd; }
+        .table-container { background: white; border-radius: 15px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .status-dot { height: 10px; width: 10px; background-color: #28a745; border-radius: 50%; display: inline-block; margin-right: 5px; }
     </style>
 </head>
 <body>
+    <nav class="navbar navbar-dark shadow-sm">
+        <div class="container">
+            <span class="navbar-brand mb-0 h1">NOAH Cullowhee Creek Station</span>
+            <span class="badge bg-light text-dark"><span class="status-dot"></span>Live Station Data</span>
+        </div>
+    </nav>
+
     <div class="container">
-        <h1>NOAH Sensor Network</h1>
-        <div class="status-bar">Location: Cullowhee, NC | Database: cullowhee</div>
-        
         {% if data %}
-        <table>
-            <thead>
-                <tr>
-                    <th>Time (UTC)</th>
-                    <th>Device</th>
-                    <th>Temp (°F)</th>
-                    <th>Humidity (%)</th>
-                    <th>Wind (mph)</th>
-                    <th>Rain (1h)</th>
-                    <th>Battery</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for row in data %}
-                <tr>
-                    <td>{{ row.timestamp.strftime('%Y-%m-%d %H:%M') if row.timestamp else 'N/A' }}</td>
-                    <td>{{ row.device_id }}</td>
-                    <td>{{ row.temp_f if row.temp_f is not none else '--' }}°</td>
-                    <td>{{ row.humidity if row.humidity is not none else '--' }}%</td>
-                    <td>{{ row.wind_speed_mph if row.wind_speed_mph is not none else '0' }}</td>
-                    <td>{{ row.rain_1h_in if row.rain_1h_in is not none else '0.00' }}"</td>
-                    <td>{{ row.battery_v if row.battery_v is not none else '--' }}V</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+        <!-- Recent Summary Cards -->
+        <div class="row g-4 mb-5">
+            <div class="col-md-3">
+                <div class="card card-stat text-center p-3">
+                    <div class="text-muted small">Current Temp</div>
+                    <div class="stat-value">{{ data[0].temp_f }}°F</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card card-stat text-center p-3">
+                    <div class="text-muted small">Humidity</div>
+                    <div class="stat-value">{{ data[0].humidity }}%</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card card-stat text-center p-3">
+                    <div class="text-muted small">Wind Speed</div>
+                    <div class="stat-value">{{ data[0].wind_speed_mph }} <span style="font-size: 0.8rem">mph</span></div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card card-stat text-center p-3">
+                    <div class="text-muted small">Battery</div>
+                    <div class="stat-value">{{ data[0].battery_v }}V</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- History Table -->
+        <div class="table-container mb-5">
+            <h5 class="mb-4">Historical Readings</h5>
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Timestamp (UTC)</th>
+                            <th>Temp (°F)</th>
+                            <th>Humidity</th>
+                            <th>Rain (1h)</th>
+                            <th>Wind Dir</th>
+                            <th>Battery</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in data %}
+                        <tr>
+                            <td class="text-muted">{{ row.timestamp.strftime('%m/%d %H:%M') }}</td>
+                            <td><strong>{{ row.temp_f }}°</strong></td>
+                            <td>{{ row.humidity }}%</td>
+                            <td>{{ row.rain_1h_in }} in</td>
+                            <td>{{ row.wind_dir_deg }}°</td>
+                            <td><span class="badge bg-secondary">{{ row.battery_v }}V</span></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
         {% else %}
-        <p>No records found in <b>noah_sensor_data</b> yet. Waiting for Notecard sync...</p>
+        <div class="alert alert-info shadow-sm">No data found in Firestore collection <b>noah_sensor_data</b> yet.</div>
         {% endif %}
     </div>
+
+    <script src="https://jsdelivr.net"></script>
 </body>
 </html>
 """
@@ -69,13 +107,12 @@ HTML_TEMPLATE = """
 @app.route("/")
 def home():
     try:
-        # Fetch last 50 records from your specific collection
-        docs = db.collection("noah_sensor_data").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(50).stream()
+        # Fetch last 30 records
+        docs = db.collection("noah_sensor_data").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(30).stream()
         data = [doc.to_dict() for doc in docs]
         return render_template_string(HTML_TEMPLATE, data=data)
     except Exception as e:
-        logging.error(f"Webpage error: {e}")
-        return f"Error loading database: {e}", 500
+        return f"<div style='padding:50px;'><h4>Database Connection Error</h4><p>{e}</p></div>", 500
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
