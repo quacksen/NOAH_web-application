@@ -7,4 +7,5 @@ COPY app.py .
 # Cloud Run sets the PORT env var automatically; it's best to reference it
 ENV PORT=8080
 
-CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0", "--browser.gatherUsageStats=false", "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
+# Using shell form to ensure $PORT is expanded correctly
+CMD streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.enableCORS=false --server.enableXsrfProtection=false
