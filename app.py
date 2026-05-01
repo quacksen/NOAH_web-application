@@ -10,17 +10,18 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from streamlit_folium import st_folium
+from google.cloud import firestore
 
 # ============================================================
 # PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
-    page_title="WCU Belk Weather Intelligence",
+    page_title="NOAH | Belk Weather Intelligence",
     layout="wide",
 )
 
-st_autorefresh(interval=300000, key="refresh")
+st_autorefresh(interval=30000, key="refresh")
 
 # ============================================================
 # CONSTANTS / CONFIG
@@ -28,16 +29,11 @@ st_autorefresh(interval=300000, key="refresh")
 
 LAT = 35.307205
 LON = -83.182899
-SITE = "Belk Building — Western Carolina University, Cullowhee, NC"
+SITE = "NOAH Station — Western Carolina University, Cullowhee, NC"
 TIMEZONE = ZoneInfo("America/New_York")
 
 AIRPORT_ID = "K24A"
 NWS_USER_AGENT = "(WCU-Belk-Weather/1.0 mickey.b.henson@gmail.com)"
-
-USGS_GAUGES = {
-    "03439000": "Tuckasegee @ Cullowhee",
-    "03460000": "Tuckasegee @ Bryson City",
-}
 
 COLORS = {
     "cyan":   "#00FFFF",
@@ -52,12 +48,11 @@ COLORS = {
 }
 
 GAUGE_THRESHOLDS = {
-    "lightning": [
-        {"range": [0, 1],   "color": "rgba(0,255,156,0.12)"},
-        {"range": [1, 5],   "color": "rgba(255,51,51,0.12)"},
-        {"range": [5, 10],  "color": "rgba(255,140,0,0.12)"},
-        {"range": [10, 15], "color": "rgba(255,215,0,0.12)"},
-        {"range": [15, 25], "color": "rgba(0,255,156,0.12)"},
+    "lightning_dist": [
+        {"range": [0,  5],  "color": "rgba(255,51,51,0.12)"},
+        {"range": [5,  10], "color": "rgba(255,140,0,0.12)"},
+        {"range": [10, 20], "color": "rgba(255,215,0,0.12)"},
+        {"range": [20, 25], "color": "rgba(0,255,156,0.12)"},
     ],
     "temp": [
         {"range": [0, 32],    "color": "rgba(90,200,250,0.12)"},
@@ -122,6 +117,29 @@ GAUGE_THRESHOLDS = {
         {"range": [1.5, 3.0], "color": "rgba(255,140,0,0.12)"},
         {"range": [3.0, 5.0], "color": "rgba(255,51,51,0.12)"},
     ],
+    "rain_rate": [
+        {"range": [0, 0.1],  "color": "rgba(0,255,156,0.12)"},
+        {"range": [0.1, 0.5],"color": "rgba(255,215,0,0.12)"},
+        {"range": [0.5, 1.5],"color": "rgba(255,140,0,0.12)"},
+        {"range": [1.5, 4.0],"color": "rgba(255,51,51,0.12)"},
+    ],
+    "battery": [
+        {"range": [3.0, 3.5], "color": "rgba(255,51,51,0.12)"},
+        {"range": [3.5, 3.7], "color": "rgba(255,215,0,0.12)"},
+        {"range": [3.7, 4.2], "color": "rgba(0,255,156,0.12)"},
+    ],
+    "signal": [
+        {"range": [0, 30],  "color": "rgba(255,51,51,0.12)"},
+        {"range": [30, 60], "color": "rgba(255,215,0,0.12)"},
+        {"range": [60, 85], "color": "rgba(0,255,156,0.12)"},
+        {"range": [85,100], "color": "rgba(0,255,255,0.12)"},
+    ],
+    "stage": [
+        {"range": [0, 3],   "color": "rgba(0,255,156,0.12)"},
+        {"range": [3, 6],   "color": "rgba(255,215,0,0.12)"},
+        {"range": [6, 10],  "color": "rgba(255,140,0,0.12)"},
+        {"range": [10, 20], "color": "rgba(255,51,51,0.12)"},
+    ],
 }
 
 # ============================================================
@@ -175,6 +193,14 @@ section.main > div { position: relative; z-index: 1; }
     font-size: 0.72em; color: #7AACCC;
     font-family: 'Share Tech Mono', monospace; margin: 2px;
 }
+.noah-badge {
+    display: inline-block;
+    background: rgba(0,255,156,0.10);
+    border: 1px solid rgba(0,255,156,0.35);
+    border-radius: 20px; padding: 2px 10px;
+    font-size: 0.72em; color: #00FF9C;
+    font-family: 'Share Tech Mono', monospace; margin: 2px;
+}
 .data-card {
     background: rgba(0,136,255,0.04);
     border: 1px solid rgba(0,136,255,0.14);
@@ -219,6 +245,12 @@ def format_num(value, digits=1, suffix=""):
     if value is None:
         return "--"
     return f"{round(value, digits)}{suffix}"
+
+def wind_dir_label(deg):
+    if deg is None:
+        return "--"
+    dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"]
+    return dirs[round(float(deg) / 22.5) % 16]
 
 # ============================================================
 # SCIENCE / CALCS
@@ -328,45 +360,6 @@ def build_forecast_tile(day, is_today=False):
         + '</div>'
     )
 
-def estimate_soil_moisture_belk(rain_30d, today_rain=0.0, profile="belk_compacted"):
-    profiles = {
-        "belk_compacted": {
-            "field_capacity": 2.40, "wilting_point": 1.55, "max_storage": 3.10,
-            "base_infiltration_eff": 0.55, "drainage_coeff": 0.030, "recent_rain_boost": 1.20,
-        },
-    }
-    p = profiles.get(profile, profiles["belk_compacted"])
-    monthly_et = {1:0.04,2:0.06,3:0.10,4:0.14,5:0.17,6:0.20,7:0.21,8:0.19,9:0.14,10:0.09,11:0.05,12:0.03}
-    field_capacity = p["field_capacity"]; wilting_point = p["wilting_point"]
-    max_storage = p["max_storage"]; infil_eff = p["base_infiltration_eff"]
-    drainage_coeff = p["drainage_coeff"]; recent_rain_boost = p["recent_rain_boost"]
-    storage = field_capacity
-    today = now_local().date()
-    dates = [today - timedelta(days=(len(rain_30d)-1-i)) for i in range(len(rain_30d))]
-    for i, (rain, d) in enumerate(zip(rain_30d, dates)):
-        rain = rain or 0.0
-        et_daily = monthly_et.get(d.month, 0.10)
-        days_ago = len(rain_30d) - 1 - i
-        weight = recent_rain_boost if days_ago <= 7 else 1.0
-        if rain <= 0.30:
-            effective_rain = rain * infil_eff
-        elif rain <= 1.00:
-            effective_rain = (0.30*infil_eff) + ((rain-0.30)*infil_eff*0.80)
-        else:
-            effective_rain = (0.30*infil_eff) + (0.70*infil_eff*0.80) + ((rain-1.00)*infil_eff*0.45)
-        effective_rain *= weight
-        drainage = max(0.0, (storage - field_capacity) * drainage_coeff)
-        storage = storage + effective_rain - et_daily - drainage
-        storage = max(wilting_point, min(max_storage, storage))
-    storage = min(max_storage, storage + (today_rain or 0.0) * infil_eff)
-    pct = ((storage - wilting_point) / (max_storage - wilting_point)) * 100
-    pct = clamp(pct, 0, 100)
-    if pct >= 90:   return round(pct,1), "SATURATED", COLORS["red"],    round(storage,2)
-    elif pct >= 75: return round(pct,1), "WET",       COLORS["orange"],  round(storage,2)
-    elif pct >= 50: return round(pct,1), "MOIST",     COLORS["yellow"],  round(storage,2)
-    elif pct >= 25: return round(pct,1), "ADEQUATE",  COLORS["green"],   round(storage,2)
-    else:           return round(pct,1), "DRY",        COLORS["blue"],   round(storage,2)
-
 def moon_phase_info(target_dt=None):
     if target_dt is None:
         target_dt = now_local()
@@ -382,24 +375,54 @@ def moon_phase_info(target_dt=None):
     moon_age = frac * 29.5305882
     illumination = (1 - math.cos(2*math.pi*frac)) / 2
     illumination_pct = round(illumination * 100, 1)
-    if moon_age < 1.84566:   phase_name = "NEW MOON"
-    elif moon_age < 5.53699: phase_name = "WAXING CRESCENT"
-    elif moon_age < 9.22831: phase_name = "FIRST QUARTER"
-    elif moon_age < 12.91963:phase_name = "WAXING GIBBOUS"
-    elif moon_age < 16.61096:phase_name = "FULL MOON"
-    elif moon_age < 20.30228:phase_name = "WANING GIBBOUS"
-    elif moon_age < 23.99361:phase_name = "LAST QUARTER"
-    elif moon_age < 27.68493:phase_name = "WANING CRESCENT"
-    else:                     phase_name = "NEW MOON"
+    if moon_age < 1.84566:    phase_name = "NEW MOON"
+    elif moon_age < 5.53699:  phase_name = "WAXING CRESCENT"
+    elif moon_age < 9.22831:  phase_name = "FIRST QUARTER"
+    elif moon_age < 12.91963: phase_name = "WAXING GIBBOUS"
+    elif moon_age < 16.61096: phase_name = "FULL MOON"
+    elif moon_age < 20.30228: phase_name = "WANING GIBBOUS"
+    elif moon_age < 23.99361: phase_name = "LAST QUARTER"
+    elif moon_age < 27.68493: phase_name = "WANING CRESCENT"
+    else:                      phase_name = "NEW MOON"
     return illumination_pct, phase_name, round(moon_age, 1)
 
 # ============================================================
-# DATA FETCHERS — OBSERVATIONS
+# FIRESTORE — NOAH SENSOR DATA
+# ============================================================
+
+@st.cache_resource
+def get_firestore_client():
+    try:
+        return firestore.Client(database="cullowhee")
+    except Exception:
+        return firestore.Client()
+
+@st.cache_data(ttl=30)
+def fetch_noah_sensor():
+    """Pull the latest document from Firestore. Returns ok_payload."""
+    try:
+        db = get_firestore_client()
+        docs = (
+            db.collection("noah_sensor_data")
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .limit(1)
+            .stream()
+        )
+        doc = next((d.to_dict() for d in docs), None)
+        if doc is None:
+            return ok_payload(source="NOAH FIRESTORE", error="No documents found")
+        if "timestamp" in doc and hasattr(doc["timestamp"], "strftime"):
+            doc["_ts_str"] = doc["timestamp"].strftime("%Y-%m-%d %H:%M:%S UTC")
+        return ok_payload(data=doc, source="NOAH FIRESTORE")
+    except Exception as e:
+        return ok_payload(source="NOAH FIRESTORE", error=str(e))
+
+# ============================================================
+# EXTERNAL API FETCHERS  (unchanged from original)
 # ============================================================
 
 @st.cache_data(ttl=300)
 def fetch_airport_metar():
-    """Primary obs source: K24A METAR — temp, wind, precip, pressure."""
     try:
         r = safe_get(
             "https://aviationweather.gov/api/data/metar",
@@ -416,7 +439,6 @@ def fetch_airport_metar():
         dwpt_c = obs.get("dewp")
         if temp_c is not None and dwpt_c is not None:
             try:
-                # Magnus formula relative humidity from T and Td
                 a, b = 17.625, 243.04
                 gamma = (a * dwpt_c) / (b + dwpt_c)
                 gamma_t = (a * temp_c) / (b + temp_c)
@@ -425,16 +447,16 @@ def fetch_airport_metar():
             except Exception:
                 humidity = None
         payload = {
-            "temp_f":   round(temp_c * 9/5 + 32, 1) if temp_c is not None else None,
-            "wind_mph": round(obs.get("wspd", 0) * 1.15078, 1) if obs.get("wspd") else 0.0,
-            "wind_dir": obs.get("wdir", 0),
+            "temp_f":        round(temp_c * 9/5 + 32, 1) if temp_c is not None else None,
+            "wind_mph":      round(obs.get("wspd", 0) * 1.15078, 1) if obs.get("wspd") else 0.0,
+            "wind_dir":      obs.get("wdir", 0),
             "wind_gust_mph": round(obs.get("wgst", 0) * 1.15078, 1) if obs.get("wgst") else None,
-            "altim":    obs.get("altim"),
-            "precip":   obs.get("precip", 0.0),
-            "humidity": humidity,
-            "cover":    obs.get("skyCondition", [{}])[0].get("skyCover", "CLR") if obs.get("skyCondition") else "CLR",
-            "raw":      obs.get("rawOb", ""),
-            "time":     obs.get("obsTime", ""),
+            "altim":         obs.get("altim"),
+            "precip":        obs.get("precip", 0.0),
+            "humidity":      humidity,
+            "cover":         obs.get("skyCondition", [{}])[0].get("skyCover", "CLR") if obs.get("skyCondition") else "CLR",
+            "raw":           obs.get("rawOb", ""),
+            "time":          obs.get("obsTime", ""),
         }
         return ok_payload(data=payload, source="METAR K24A")
     except Exception as e:
@@ -443,11 +465,6 @@ def fetch_airport_metar():
 
 @st.cache_data(ttl=300)
 def fetch_openmeteo_current():
-    """
-    Open-Meteo current conditions:
-    UV index, solar radiation, hourly precip, relative humidity.
-    No API key required.
-    """
     try:
         r = safe_get(
             "https://api.open-meteo.com/v1/forecast",
@@ -461,23 +478,20 @@ def fetch_openmeteo_current():
                     "surface_pressure"
                 ),
                 "hourly":    "precipitation",
-                "temperature_unit":  "fahrenheit",
-                "precipitation_unit":"inch",
-                "windspeed_unit":    "mph",
-                "timezone":          "America/New_York",
-                "forecast_days":     1,
+                "temperature_unit":   "fahrenheit",
+                "precipitation_unit": "inch",
+                "windspeed_unit":     "mph",
+                "timezone":           "America/New_York",
+                "forecast_days":      1,
             },
             timeout=12,
         )
         r.raise_for_status()
         d = r.json()
         cur = d.get("current", {})
-
-        # today rain = sum of hourly precip up to current hour
         hourly_precip = d.get("hourly", {}).get("precipitation", [])
         current_hour  = now_local().hour
         rain_today    = round(sum(v or 0.0 for v in hourly_precip[:current_hour+1]), 2)
-
         payload = {
             "uv":           cur.get("uv_index", 0) or 0,
             "solar":        round(cur.get("shortwave_radiation", 0) or 0, 1),
@@ -489,55 +503,13 @@ def fetch_openmeteo_current():
             "wind_gust":    cur.get("wind_gusts_10m", 0),
             "pressure_hpa": cur.get("surface_pressure"),
         }
-        # convert hPa to inHg
         if payload["pressure_hpa"]:
             payload["pressure_inhg"] = round(payload["pressure_hpa"] * 0.02953, 2)
         else:
             payload["pressure_inhg"] = None
-
         return ok_payload(data=payload, source="OPEN-METEO")
     except Exception as e:
         return ok_payload(source="OPEN-METEO", error=str(e))
-
-
-@st.cache_data(ttl=60)
-def fetch_blitzortung_lightning():
-    try:
-        utc_now = datetime.utcnow()
-        closest_dist = None
-        for minutes_back in range(0, 31):
-            t = utc_now - timedelta(minutes=minutes_back)
-            url = (
-                "https://data.blitzortung.org/Data/Protected/By_Location/"
-                "By_Region/America/Strokes/"
-                f"{t.year}/{t.month:02d}/{t.day:02d}/{t.hour:02d}/{t.minute:02d}.json"
-            )
-            try:
-                r = safe_get(url, timeout=4)
-                if r.status_code != 200 or not r.text.strip():
-                    continue
-                for stroke in r.json():
-                    slat = stroke.get("lat") or stroke.get("y")
-                    slon = stroke.get("lon") or stroke.get("x")
-                    if slat is None or slon is None:
-                        continue
-                    dist = haversine_miles(LAT, LON, float(slat), float(slon))
-                    if closest_dist is None or dist < closest_dist:
-                        closest_dist = dist
-            except Exception:
-                continue
-        if closest_dist is None:
-            return ok_payload(source="BLITZORTUNG", error="No strokes found")
-        return ok_payload(data={"dist": round(closest_dist, 1)}, source="BLITZORTUNG")
-    except Exception as e:
-        return ok_payload(source="BLITZORTUNG", error=str(e))
-
-
-def resolve_lightning(blitz_payload):
-    blitz_dist = blitz_payload.get("data", {}).get("dist")
-    if blitz_dist is not None:
-        return round(blitz_dist, 1), "BLITZORTUNG", True
-    return 0.0, "NO STRIKES", False
 
 
 @st.cache_data(ttl=1800)
@@ -566,38 +538,6 @@ def fetch_aqi():
         return ok_payload(source="OPEN-METEO AQI", error=str(e))
 
 
-@st.cache_data(ttl=60)
-def fetch_usgs_gauges():
-    results = {}
-    for site_id, name in USGS_GAUGES.items():
-        try:
-            r = safe_get(
-                "https://waterservices.usgs.gov/nwis/iv/",
-                params={"format": "json", "sites": site_id, "parameterCd": "00065,00060"},
-                timeout=8,
-            )
-            r.raise_for_status()
-            ts_list = r.json().get("value", {}).get("timeSeries", [])
-            stage_ft = None; discharge_cfs = None
-            for ts in ts_list:
-                code = ts["variable"]["variableCode"][0]["value"]
-                vals = ts["values"][0]["value"]
-                if not vals: continue
-                try:
-                    v = float(vals[-1]["value"])
-                    if code == "00065":   stage_ft     = round(v, 2)
-                    elif code == "00060": discharge_cfs = round(v, 0)
-                except (ValueError, TypeError):
-                    pass
-            if stage_ft is None and discharge_cfs is None:
-                results[site_id] = {"name": name, "stage_ft": None, "discharge_cfs": None, "ok": False, "error": "No data"}
-            else:
-                results[site_id] = {"name": name, "stage_ft": stage_ft, "discharge_cfs": discharge_cfs, "ok": True, "error": None}
-        except Exception as e:
-            results[site_id] = {"name": name, "stage_ft": None, "discharge_cfs": None, "ok": False, "error": str(e)}
-    return results
-
-
 @st.cache_data(ttl=3600)
 def fetch_historical_rain_30d():
     try:
@@ -621,9 +561,6 @@ def fetch_historical_rain_30d():
     except Exception as e:
         return ok_payload(data={"rain_30d": [0.05]*30}, source="OPEN-METEO HIST", error=str(e))
 
-# ============================================================
-# DATA FETCHERS — FORECAST
-# ============================================================
 
 @st.cache_data(ttl=900)
 def fetch_nws_forecast():
@@ -737,9 +674,9 @@ def fetch_ecmwf_open_meteo():
 
 @st.cache_data(ttl=900)
 def fetch_best_7day_forecast():
-    nws_p  = fetch_nws_forecast()
-    hrrr_p = fetch_hrrr_open_meteo()
-    ecmwf_p= fetch_ecmwf_open_meteo()
+    nws_p   = fetch_nws_forecast()
+    hrrr_p  = fetch_hrrr_open_meteo()
+    ecmwf_p = fetch_ecmwf_open_meteo()
     nws_by_date   = {d["date"]: d for d in nws_p["data"].get("days", [])}
     hrrr_by_date  = {d["date"]: d for d in hrrr_p["data"].get("days", [])}
     ecmwf_by_date = {d["date"]: d for d in ecmwf_p["data"].get("days", [])}
@@ -776,9 +713,6 @@ def fetch_best_7day_forecast():
     errors = {n: p["error"] for p, n in [(nws_p,"NWS"),(hrrr_p,"HRRR"),(ecmwf_p,"ECMWF")] if p.get("error")}
     return ok_payload(data={"days": final_days, "errors": errors}, source="NWS/HRRR/ECMWF")
 
-# ============================================================
-# DATA FETCHERS — RADAR & ALERTS
-# ============================================================
 
 @st.cache_data(ttl=180)
 def fetch_rainviewer_frames():
@@ -816,7 +750,7 @@ def fetch_nws_alerts():
         return ok_payload(data={"alerts": []}, source="NWS ALERTS", error=str(e))
 
 # ============================================================
-# RADAR MAP BUILDER
+# RADAR MAP BUILDER  (unchanged)
 # ============================================================
 
 def build_radar_folium_map(rv_payload, alerts_payload):
@@ -835,13 +769,13 @@ def build_radar_folium_map(rv_payload, alerts_payload):
     folium.CircleMarker(
         location=[LAT, LON], radius=10,
         color="#00FFFF", weight=2, fill=True, fill_color="#00FFFF", fill_opacity=0.88,
-        tooltip="<b>WCU Belk Building</b><br>Cullowhee, NC · 35.307°N | 83.183°W",
-        popup=folium.Popup("<b>WCU Belk Building</b><br>Cullowhee, NC", max_width=200),
+        tooltip="<b>NOAH Station — WCU Belk Building</b><br>Cullowhee, NC · 35.307°N | 83.183°W",
+        popup=folium.Popup("<b>NOAH Station</b><br>WCU Cullowhee, NC", max_width=200),
     ).add_to(m)
     folium.Marker(
         location=[LAT+0.025, LON+0.01],
         icon=folium.DivIcon(
-            html='<div style="font-family:Share Tech Mono,monospace;font-size:11px;color:#00FFFF;font-weight:700;white-space:nowrap;text-shadow:0 0 8px rgba(0,50,100,0.95);">WCU BELK</div>',
+            html='<div style="font-family:Share Tech Mono,monospace;font-size:11px;color:#00FFFF;font-weight:700;white-space:nowrap;text-shadow:0 0 8px rgba(0,50,100,0.95);">✦ NOAH</div>',
             icon_size=(80,16), icon_anchor=(40,8),
         ),
     ).add_to(m)
@@ -921,7 +855,7 @@ def build_radar_folium_map(rv_payload, alerts_payload):
     return m
 
 # ============================================================
-# UI HELPERS
+# UI HELPERS  (unchanged)
 # ============================================================
 
 def make_gauge(value, title, min_val=0, max_val=100, unit="%", thresholds=None, color=None):
@@ -958,8 +892,10 @@ def sublabel(text, color=COLORS["muted"]):
 def subsub(text, color=COLORS["muted"]):
     return f"<div style='text-align:center;font-family:Rajdhani;font-size:0.85em;color:{color};'>{text}</div>"
 
-def srctag(text):
-    return f"<div style='text-align:center;font-family:Share Tech Mono,monospace;font-size:0.62em;color:#2A6080;margin-top:1px;'>SRC: {text}</div>"
+def srctag(text, noah=False):
+    color = "#006630" if noah else "#2A6080"
+    label = f"✦ {text}" if noah else f"SRC: {text}"
+    return f"<div style='text-align:center;font-family:Share Tech Mono,monospace;font-size:0.62em;color:{color};margin-top:1px;'>{label}</div>"
 
 def render_gauge_card(column, config):
     with column:
@@ -971,14 +907,17 @@ def render_gauge_card(column, config):
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
         st.markdown(sublabel(config["label"], config["color"]), unsafe_allow_html=True)
         st.markdown(subsub(config["detail"]), unsafe_allow_html=True)
-        st.markdown(srctag(config["source"]), unsafe_allow_html=True)
+        st.markdown(srctag(config["source"], noah=config.get("noah", False)), unsafe_allow_html=True)
 
-def render_source_status_badge(label, is_live):
-    return f"<span class='source-badge'>{label}: {'LIVE' if is_live else 'OFFLINE'}</span>"
+def render_source_status_badge(label, is_live, noah=False):
+    cls = "noah-badge" if noah else "source-badge"
+    return f"<span class='{cls}'>{label}: {'LIVE' if is_live else 'OFFLINE'}</span>"
 
-def render_data_card(title, value, detail=None):
+def render_data_card(title, value, detail=None, noah=False):
+    border = "rgba(0,255,156,0.2)" if noah else "rgba(0,136,255,0.14)"
+    bg     = "rgba(0,255,156,0.03)" if noah else "rgba(0,136,255,0.04)"
     st.markdown(f"""
-        <div class="data-card">
+        <div class="data-card" style="border-color:{border};background:{bg};">
             <div class="data-card-title">{title}</div>
             <div class="data-card-value">{value}</div>
             <div class="small-muted">{detail or ''}</div>
@@ -988,17 +927,18 @@ def render_data_card(title, value, detail=None):
 # LOAD ALL DATA
 # ============================================================
 
-with st.spinner("Syncing all data sources..."):
+with st.spinner("Syncing all data sources…"):
+    noah_payload     = fetch_noah_sensor()
     airport_payload  = fetch_airport_metar()
     om_payload       = fetch_openmeteo_current()
-    blitz_payload    = fetch_blitzortung_lightning()
     aqi_payload      = fetch_aqi()
-    usgs_data        = fetch_usgs_gauges()
     forecast_payload = fetch_best_7day_forecast()
     hist_payload     = fetch_historical_rain_30d()
     rv_payload       = fetch_rainviewer_frames()
     alerts_payload   = fetch_nws_alerts()
 
+# ── Unpack sources ────────────────────────────────────────────
+noah     = noah_payload.get("data", {})
 airport  = airport_payload.get("data", {})
 om       = om_payload.get("data", {})
 aqi_data = aqi_payload.get("data", {})
@@ -1006,46 +946,89 @@ forecast = forecast_payload.get("data", {}).get("days", [])
 hist_rain= hist_payload.get("data", {}).get("rain_30d", [0.05]*30)
 
 # ============================================================
-# DERIVED METRICS
+# NOAH SENSOR FIELDS  (from Firestore — these are ground truth)
 # ============================================================
 
-# Temperature: METAR primary, Open-Meteo fallback (converted from C if needed)
-temp_now = first_non_none(airport.get("temp_f"), om.get("temp_f"))
+n_temp_f          = noah.get("temp_f")
+n_humidity        = noah.get("humidity")
+n_pressure_inhg   = noah.get("pressure_inhg")
+n_wind_speed_mph  = noah.get("wind_speed_mph")
+n_wind_dir_deg    = noah.get("wind_dir_deg")
+n_wind_gust_mph   = noah.get("wind_gust_mph")
+n_rain_rate       = noah.get("rain_rate_in_hr", 0.0) or 0.0
+n_rain_1h         = noah.get("rain_1h_in", 0.0) or 0.0
+n_rain_24h        = noah.get("rain_24h_in", 0.0) or 0.0
+n_rain_event      = noah.get("rain_event_in", 0.0) or 0.0
+n_soil_1          = noah.get("soil_moisture_1")
+n_soil_2          = noah.get("soil_moisture_2")
+n_soil_3          = noah.get("soil_moisture_3")
+n_soil_4          = noah.get("soil_moisture_4")
+n_soil_5          = noah.get("soil_moisture_5")
+n_lightning_count = int(noah.get("lightning_count", 0) or 0)
+n_lightning_km    = noah.get("lightning_dist_km")
+n_stage_ft        = noah.get("stage_ft")
+n_velocity_mps    = noah.get("velocity_mps")
+n_battery_v       = noah.get("battery_v", 0.0) or 0.0
+n_signal          = noah.get("signal_strength", 0.0) or 0.0
+n_device_id       = noah.get("device_id", "--")
+n_ts_str          = noah.get("_ts_str", "--")
 
-# Humidity: METAR-derived primary, Open-Meteo fallback
-hum_now = first_non_none(airport.get("humidity"), om.get("humidity"))
+# Lightning distance: convert km → miles if available
+n_lightning_mi = round(n_lightning_km * 0.621371, 1) if n_lightning_km is not None else None
 
-# Wind: METAR primary, Open-Meteo fallback
-wind_now  = first_non_none(airport.get("wind_mph"), om.get("wind_speed"), 0) or 0
-wind_gust = first_non_none(airport.get("wind_gust_mph"), om.get("wind_gust"))
+# ============================================================
+# DERIVED METRICS
+# NOAH sensor is ground truth; external APIs fill gaps only
+# ============================================================
 
-# Pressure: METAR altim (already inHg) primary, Open-Meteo fallback
-pressure_now = first_non_none(airport.get("altim"), om.get("pressure_inhg"), 29.92)
+# Temperature: NOAH primary
+temp_now     = first_non_none(n_temp_f, airport.get("temp_f"))
+# Humidity: NOAH primary
+hum_now      = first_non_none(n_humidity, airport.get("humidity"), om.get("humidity"))
+# Wind: NOAH primary
+wind_now     = first_non_none(n_wind_speed_mph, airport.get("wind_mph"), om.get("wind_speed"), 0) or 0
+wind_gust    = first_non_none(n_wind_gust_mph, airport.get("wind_gust_mph"), om.get("wind_gust"))
+wind_dir     = first_non_none(n_wind_dir_deg, airport.get("wind_dir"))
+# Pressure: NOAH primary
+pressure_now = first_non_none(n_pressure_inhg, airport.get("altim"), om.get("pressure_inhg"), 29.92)
+# Rain: NOAH primary (has 1h, 24h, rate, event)
+rain_1h      = n_rain_1h
+rain_today   = first_non_none(n_rain_24h if n_rain_24h else None, om.get("rain_today", 0.0)) or 0.0
 
-# Rain: Open-Meteo hourly accumulation (METAR precip is instantaneous)
-rain_today = om.get("rain_today", 0.0) or 0.0
-rain_1hr   = om.get("rain_1hr", 0.0) or 0.0
-
-# UV & Solar: Open-Meteo only
+# UV & Solar: Open-Meteo only (sensor doesn't measure these)
 uv_val  = om.get("uv", 0) or 0
 solar   = om.get("solar", 0) or 0
 
-# Lightning: Blitzortung only
-l_dist, l_source, lightning_detected = resolve_lightning(blitz_payload)
-if lightning_detected:
-    l_display = min(l_dist, 25)
-    l_color = COLORS["red"] if l_dist < 5 else COLORS["orange"] if l_dist < 10 else COLORS["yellow"] if l_dist < 15 else COLORS["green"]
-    l_label = "CRITICAL" if l_dist < 5 else "NEARBY" if l_dist < 10 else "MODERATE" if l_dist < 15 else "DISTANT"
-    l_detail = f"Nearest Strike: <b style='color:#00FFCC'>{l_dist:.1f} mi</b>"
+# Lightning: NOAH primary (count + distance)
+if n_lightning_count > 0 and n_lightning_mi is not None:
+    l_display = clamp(n_lightning_mi, 0, 25)
+    l_color   = COLORS["red"] if n_lightning_mi < 5 else COLORS["orange"] if n_lightning_mi < 10 else COLORS["yellow"] if n_lightning_mi < 15 else COLORS["green"]
+    l_label   = "CRITICAL" if n_lightning_mi < 5 else "NEARBY" if n_lightning_mi < 10 else "MODERATE" if n_lightning_mi < 15 else "DISTANT"
+    l_detail  = f"Nearest strike: <b style='color:#00FFCC'>{n_lightning_mi:.1f} mi</b> · Count: <b style='color:#00FFCC'>{n_lightning_count}</b>"
+    l_source  = "NOAH FIRESTORE"
+elif n_lightning_count > 0:
+    l_display = clamp(n_lightning_count, 0, 25)
+    l_color   = COLORS["red"] if n_lightning_count < 5 else COLORS["orange"]
+    l_label   = "DETECTED"
+    l_detail  = f"Count: <b style='color:#00FFCC'>{n_lightning_count}</b> · Distance unknown"
+    l_source  = "NOAH FIRESTORE"
 else:
     l_display = 0.0; l_color = COLORS["green"]; l_label = "NO STRIKES"
-    l_detail = "No lightning detected nearby"
+    l_detail  = "No lightning detected"; l_source = "NOAH FIRESTORE"
 
 rain_3d_forecast = sum((day.get("precip") or 0.0) for day in forecast[:3]) if forecast else 0.0
 pop_today  = forecast[0]["pop"] if forecast else 0
 today_src  = forecast[0].get("source", "CASCADE") if forecast else "CASCADE"
 
-soil_pct, soil_status, soil_color, soil_storage = estimate_soil_moisture_belk(hist_rain, rain_today)
+# Soil moisture: average available sensors (0–100 scale assumed)
+soil_vals = [v for v in [n_soil_1, n_soil_2, n_soil_3, n_soil_4, n_soil_5] if v is not None]
+soil_avg  = round(sum(soil_vals) / len(soil_vals), 1) if soil_vals else None
+if soil_avg is not None:
+    soil_pct    = clamp(soil_avg, 0, 100)
+    soil_color  = COLORS["blue"] if soil_pct < 25 else COLORS["green"] if soil_pct < 50 else COLORS["yellow"] if soil_pct < 75 else COLORS["red"]
+    soil_status = "DRY" if soil_pct < 25 else "ADEQUATE" if soil_pct < 50 else "MOIST" if soil_pct < 75 else "SATURATED"
+else:
+    soil_pct = 0; soil_color = COLORS["muted"]; soil_status = "NO DATA"
 
 uv_color = COLORS["green"] if uv_val <= 2 else COLORS["lime"] if uv_val <= 5 else COLORS["yellow"] if uv_val <= 7 else COLORS["orange"] if uv_val <= 10 else COLORS["red"]
 uv_label = "LOW" if uv_val <= 2 else "MODERATE" if uv_val <= 5 else "HIGH" if uv_val <= 7 else "VERY HIGH" if uv_val <= 10 else "EXTREME"
@@ -1054,7 +1037,7 @@ temp_display = clamp(temp_now if temp_now is not None else 70, 0, 120)
 temp_color = COLORS["blue"] if temp_display < 32 else COLORS["cyan"] if temp_display < 50 else COLORS["green"] if temp_display < 80 else COLORS["yellow"] if temp_display < 95 else COLORS["orange"] if temp_display < 105 else COLORS["red"]
 temp_label = "FREEZING" if temp_display < 32 else "COLD" if temp_display < 50 else "MILD" if temp_display < 80 else "WARM" if temp_display < 95 else "HOT" if temp_display < 105 else "EXTREME"
 
-hum_val = hum_now or 0
+hum_val   = hum_now or 0
 hum_color = COLORS["blue"] if hum_val < 30 else COLORS["green"] if hum_val < 60 else COLORS["yellow"] if hum_val < 80 else COLORS["orange"]
 hum_label = "DRY" if hum_val < 30 else "COMFORTABLE" if hum_val < 60 else "HUMID" if hum_val < 80 else "VERY HUMID"
 
@@ -1077,6 +1060,15 @@ rain3d_display = clamp(rain_3d_forecast, 0, 5)
 rain3d_color   = COLORS["green"] if rain_3d_forecast < 0.5 else COLORS["yellow"] if rain_3d_forecast < 1.5 else COLORS["orange"] if rain_3d_forecast < 3.0 else COLORS["red"]
 rain3d_label   = "LIGHT" if rain_3d_forecast < 0.5 else "ELEVATED" if rain_3d_forecast < 1.5 else "HEAVY" if rain_3d_forecast < 3.0 else "SIGNIFICANT"
 
+batt_color = COLORS["red"] if n_battery_v < 3.5 else COLORS["yellow"] if n_battery_v < 3.7 else COLORS["green"]
+batt_label = "CRITICAL" if n_battery_v < 3.5 else "LOW" if n_battery_v < 3.7 else "GOOD"
+
+sig_color  = COLORS["red"] if n_signal < 30 else COLORS["yellow"] if n_signal < 60 else COLORS["green"] if n_signal < 85 else COLORS["cyan"]
+sig_label  = "POOR" if n_signal < 30 else "FAIR" if n_signal < 60 else "GOOD" if n_signal < 85 else "EXCELLENT"
+
+stage_color = COLORS["green"] if (n_stage_ft or 0) < 3 else COLORS["yellow"] if (n_stage_ft or 0) < 6 else COLORS["orange"] if (n_stage_ft or 0) < 10 else COLORS["red"]
+stage_label = "NORMAL" if (n_stage_ft or 0) < 3 else "ELEVATED" if (n_stage_ft or 0) < 6 else "HIGH" if (n_stage_ft or 0) < 10 else "FLOOD"
+
 current_time = now_local()
 tz_label     = current_time.tzname() or "ET"
 
@@ -1086,58 +1078,59 @@ tz_label     = current_time.tzname() or "ET"
 
 st.markdown(f"""
 <div class="site-header">
-    <div class="site-title">WCU BELK WEATHER INTELLIGENCE</div>
+    <div class="site-title">✦ NOAH WEATHER INTELLIGENCE</div>
     <div class="site-sub">{SITE} &nbsp;|&nbsp; {current_time.strftime('%A, %B %d, %Y %I:%M %p')} {tz_label}</div>
     <div style="margin-top:8px;">
+        {render_source_status_badge("✦ NOAH SENSOR", noah_payload["ok"], noah=True)}
         {render_source_status_badge("✈️ METAR K24A", airport_payload["ok"])}
         {render_source_status_badge("☀️ OPEN-METEO", om_payload["ok"])}
-        {render_source_status_badge("⚡ BLITZORTUNG", blitz_payload["ok"])}
-        {render_source_status_badge("💧 USGS", any(v["ok"] for v in usgs_data.values()))}
         {render_source_status_badge("🌬️ AQI", aqi_payload["ok"])}
         {render_source_status_badge("🌐 FORECAST", bool(forecast))}
         {render_source_status_badge("🗺️ RADAR", rv_payload["ok"])}
+        <span class='noah-badge'>DEVICE: {n_device_id}</span>
+        <span class='noah-badge'>UPDATED: {n_ts_str}</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# GAUGE ROW 1 — Hazard & Atmospheric
+# GAUGE ROW 1 — Hazard & Atmospheric  (NOAH data)
 # ============================================================
 
-st.markdown('<div class="panel"><div class="panel-title">⚡ Hazard & Atmospheric Gauges</div>', unsafe_allow_html=True)
+st.markdown('<div class="panel"><div class="panel-title">⚡ Hazard & Atmospheric Gauges — NOAH Station</div>', unsafe_allow_html=True)
 cols = st.columns(5)
 row1 = [
-    {"title":"LIGHTNING PROXIMITY","value":l_display,"min_val":0,"max_val":25,"unit":" mi",
-     "thresholds":GAUGE_THRESHOLDS["lightning"],"color":l_color,"label":l_label,"detail":l_detail,"source":l_source},
+    {"title":"LIGHTNING","value":l_display,"min_val":0,"max_val":25,"unit":" mi",
+     "thresholds":GAUGE_THRESHOLDS["lightning_dist"],"color":l_color,"label":l_label,"detail":l_detail,"source":"NOAH FIRESTORE","noah":True},
     {"title":"UV INDEX","value":uv_val,"min_val":0,"max_val":12,"unit":"",
      "thresholds":GAUGE_THRESHOLDS["uv"],"color":uv_color,"label":uv_label,
      "detail":"Protect skin >3 | Seek shade >6","source":"OPEN-METEO"},
     {"title":"AIR TEMPERATURE","value":temp_display,"min_val":0,"max_val":120,"unit":"°F",
      "thresholds":GAUGE_THRESHOLDS["temp"],"color":temp_color,"label":temp_label,
-     "detail":f"Dewpoint: <b style='color:#00FFCC'>{format_num(dp_val,1,'°F')}</b>","source":"METAR K24A"},
+     "detail":f"Dewpoint: <b style='color:#00FFCC'>{format_num(dp_val,1,'°F')}</b>","source":"NOAH FIRESTORE","noah":True},
     {"title":"HUMIDITY","value":hum_val,"min_val":0,"max_val":100,"unit":"%",
      "thresholds":GAUGE_THRESHOLDS["humidity"],"color":hum_color,"label":hum_label,
-     "detail":f"Dewpoint: <b style='color:#00FFCC'>{format_num(dp_val,1,'°F')}</b>","source":"METAR K24A"},
+     "detail":f"Dewpoint: <b style='color:#00FFCC'>{format_num(dp_val,1,'°F')}</b>","source":"NOAH FIRESTORE","noah":True},
     {"title":"WIND SPEED","value":wind_now,"min_val":0,"max_val":60,"unit":" mph",
      "thresholds":GAUGE_THRESHOLDS["wind"],
      "color":COLORS["green"] if wind_now<15 else COLORS["yellow"] if wind_now<25 else COLORS["orange"] if wind_now<35 else COLORS["red"],
      "label":"CALM" if wind_now<15 else "BREEZY" if wind_now<25 else "STRONG" if wind_now<35 else "DANGEROUS",
-     "detail":f"Gust: <b style='color:#00FFCC'>{format_num(wind_gust,1,' mph')}</b>","source":"METAR K24A"},
+     "detail":f"Gust: <b style='color:#00FFCC'>{format_num(wind_gust,1,' mph')}</b> · {wind_dir_label(wind_dir)}","source":"NOAH FIRESTORE","noah":True},
 ]
 for col, config in zip(cols, row1):
     render_gauge_card(col, config)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
-# GAUGE ROW 2 — Site Conditions
+# GAUGE ROW 2 — Site Conditions  (mix of NOAH + forecast)
 # ============================================================
 
 st.markdown('<div class="panel"><div class="panel-title">🌱 Site Condition Gauges</div>', unsafe_allow_html=True)
 cols = st.columns(5)
 row2 = [
-    {"title":"RELATIVE SOIL WETNESS","value":soil_pct,"min_val":0,"max_val":100,"unit":"%",
+    {"title":"SOIL MOISTURE (AVG)","value":soil_pct,"min_val":0,"max_val":100,"unit":"%",
      "thresholds":GAUGE_THRESHOLDS["soil"],"color":soil_color,"label":soil_status,
-     "detail":f"Belk profile storage: <b style='color:#00FFCC'>{soil_storage} in</b>","source":"BELK COMPACTED MODEL"},
+     "detail":f"Sensors active: <b style='color:#00FFCC'>{len(soil_vals)}/5</b>","source":"NOAH FIRESTORE","noah":True},
     {"title":"PRECIP PROBABILITY","value":pop_today,"min_val":0,"max_val":100,"unit":"%",
      "thresholds":GAUGE_THRESHOLDS["precip_prob"],"color":pop_color(pop_today),
      "label":"DRY" if pop_today<20 else "SLIGHT" if pop_today<40 else "CHANCE" if pop_today<60 else "LIKELY" if pop_today<80 else "CERTAIN",
@@ -1157,32 +1150,58 @@ for col, config in zip(cols, row2):
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
-# GAUGE ROW 3 — Rain & Short-Term
+# GAUGE ROW 3 — Rain & Pressure  (NOAH data)
 # ============================================================
 
-st.markdown('<div class="panel"><div class="panel-title">🌧️ Rain & Short-Term Impact</div>', unsafe_allow_html=True)
-cols = st.columns(3)
+st.markdown('<div class="panel"><div class="panel-title">🌧️ Rain, Pressure & Short-Term Impact</div>', unsafe_allow_html=True)
+cols = st.columns(4)
 row3 = [
-    {"title":"TODAY RAIN","value":clamp(rain_today,0,5),"min_val":0,"max_val":5,"unit":" in",
+    {"title":"RAIN RATE","value":clamp(n_rain_rate,0,4),"min_val":0,"max_val":4,"unit":" in/hr",
+     "thresholds":GAUGE_THRESHOLDS["rain_rate"],
+     "color":COLORS["green"] if n_rain_rate<0.1 else COLORS["yellow"] if n_rain_rate<0.5 else COLORS["orange"] if n_rain_rate<1.5 else COLORS["red"],
+     "label":"NONE" if n_rain_rate<0.1 else "LIGHT" if n_rain_rate<0.5 else "MODERATE" if n_rain_rate<1.5 else "HEAVY",
+     "detail":f"1-hr total: <b style='color:#00FFCC'>{format_num(n_rain_1h,2,' in')}</b>","source":"NOAH FIRESTORE","noah":True},
+    {"title":"24-HOUR RAIN","value":clamp(rain_today,0,5),"min_val":0,"max_val":5,"unit":" in",
      "thresholds":GAUGE_THRESHOLDS["rain3d"],
      "color":COLORS["green"] if rain_today<0.25 else COLORS["yellow"] if rain_today<1.0 else COLORS["orange"] if rain_today<2.0 else COLORS["red"],
      "label":"LIGHT" if rain_today<0.25 else "MODERATE" if rain_today<1.0 else "HEAVY" if rain_today<2.0 else "SIGNIFICANT",
-     "detail":f"1 hr rain: <b style='color:#00FFCC'>{format_num(rain_1hr,2,' in')}</b>","source":"OPEN-METEO"},
+     "detail":f"Event total: <b style='color:#00FFCC'>{format_num(n_rain_event,2,' in')}</b>","source":"NOAH FIRESTORE","noah":True},
     {"title":"3-DAY RAIN","value":rain3d_display,"min_val":0,"max_val":5,"unit":" in",
      "thresholds":GAUGE_THRESHOLDS["rain3d"],"color":rain3d_color,"label":rain3d_label,
      "detail":"Sum of next 3 forecast days","source":"HRRR→NWS→ECMWF"},
-    {"title":"PRESSURE","value":clamp(pressure_now or 29.92,28,32),"min_val":28,"max_val":32,"unit":" inHg",
+    {"title":"PRESSURE","value":clamp(pressure_now,28,32),"min_val":28,"max_val":32,"unit":" inHg",
      "thresholds":[{"range":[28,29],"color":"rgba(255,51,51,0.12)"},{"range":[29,29.8],"color":"rgba(255,140,0,0.12)"},
                    {"range":[29.8,30.3],"color":"rgba(0,255,156,0.12)"},{"range":[30.3,32],"color":"rgba(90,200,250,0.12)"}],
      "color":COLORS["cyan"],"label":"BAROMETRIC",
-     "detail":f"Solar: <b style='color:#00FFCC'>{format_num(solar,0,' W/m²')}</b>","source":"METAR K24A / OPEN-METEO"},
+     "detail":f"Solar: <b style='color:#00FFCC'>{format_num(solar,0,' W/m²')}</b>","source":"NOAH FIRESTORE","noah":True},
 ]
 for col, config in zip(cols, row3):
     render_gauge_card(col, config)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
-# 7-DAY FORECAST PANEL
+# GAUGE ROW 4 — Station Health  (NOAH only)
+# ============================================================
+
+st.markdown('<div class="panel"><div class="panel-title">📡 Station Health — NOAH Sensor</div>', unsafe_allow_html=True)
+cols = st.columns(3)
+row4 = [
+    {"title":"BATTERY","value":clamp(n_battery_v,3.0,4.2),"min_val":3.0,"max_val":4.2,"unit":" V",
+     "thresholds":GAUGE_THRESHOLDS["battery"],"color":batt_color,"label":batt_label,
+     "detail":"3.7 V = full · 3.5 V = recharge","source":"NOAH FIRESTORE","noah":True},
+    {"title":"SIGNAL STRENGTH","value":clamp(n_signal,0,100),"min_val":0,"max_val":100,"unit":"%",
+     "thresholds":GAUGE_THRESHOLDS["signal"],"color":sig_color,"label":sig_label,
+     "detail":f"Raw: <b style='color:#00FFCC'>{format_num(n_signal,1)}</b>","source":"NOAH FIRESTORE","noah":True},
+    {"title":"WATER STAGE","value":clamp(n_stage_ft or 0, 0, 20),"min_val":0,"max_val":20,"unit":" ft",
+     "thresholds":GAUGE_THRESHOLDS["stage"],"color":stage_color,"label":stage_label,
+     "detail":f"Velocity: <b style='color:#00FFCC'>{format_num(n_velocity_mps,2,' m/s')}</b>","source":"NOAH FIRESTORE","noah":True},
+]
+for col, config in zip(cols, row4):
+    render_gauge_card(col, config)
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ============================================================
+# 7-DAY FORECAST PANEL  (unchanged)
 # ============================================================
 
 st.markdown('<div class="panel"><div class="panel-title">📅 Seven-Day Forecast — HRRR (0-1d) · NWS (2-3d) · ECMWF (4-6d)</div>', unsafe_allow_html=True)
@@ -1197,11 +1216,11 @@ else:
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
-# RADAR MAP PANEL
+# RADAR MAP PANEL  (unchanged)
 # ============================================================
 
-n_frames = len(rv_payload.get("data",{}).get("past",[])) + len(rv_payload.get("data",{}).get("nowcast",[]))
-n_alerts = len(alerts_payload.get("data",{}).get("alerts",[]))
+n_frames  = len(rv_payload.get("data",{}).get("past",[])) + len(rv_payload.get("data",{}).get("nowcast",[]))
+n_alerts  = len(alerts_payload.get("data",{}).get("alerts",[]))
 st.markdown(
     f'<div class="panel"><div class="panel-title">🗺️ Live Radar Map — NEXRAD Composite · NWS Storm Alerts'
     f'&nbsp;<span class="source-badge">RAINVIEWER {"LIVE" if rv_payload["ok"] else "OFFLINE"}</span>'
@@ -1221,40 +1240,46 @@ st.markdown("</div>", unsafe_allow_html=True)
 left, right = st.columns([1.2, 1.0])
 
 with left:
-    st.markdown('<div class="panel"><div class="panel-title">📡 Sensor & Observation Snapshot</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel"><div class="panel-title">📡 NOAH Sensor Snapshot</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
-        render_data_card("Air Temperature", format_num(temp_now, 1, "°F"), "METAR K24A")
-        render_data_card("Humidity", format_num(hum_now, 0, "%"), "METAR K24A (Magnus formula)")
-        render_data_card("Wind Gust", format_num(wind_gust, 1, " mph"), "METAR K24A")
-        render_data_card("Rain Today", format_num(rain_today, 2, " in"), "Open-Meteo hourly sum")
+        render_data_card("Air Temperature",   format_num(n_temp_f, 1, "°F"),         "NOAH Firestore", noah=True)
+        render_data_card("Humidity",          format_num(n_humidity, 0, "%"),         "NOAH Firestore", noah=True)
+        render_data_card("Dew Point",         format_num(dp_val, 1, "°F"),            "Calculated (Magnus formula)")
+        render_data_card("Wind",              f"{format_num(n_wind_speed_mph,1,' mph')} · Gust {format_num(n_wind_gust_mph,1,' mph')} · {wind_dir_label(n_wind_dir_deg)}", "NOAH Firestore", noah=True)
+        render_data_card("Rain Rate",         format_num(n_rain_rate, 2, " in/hr"),   "NOAH Firestore", noah=True)
     with c2:
-        render_data_card("Dew Point", format_num(dp_val, 1, "°F"), "Calculated")
-        render_data_card("Moon Phase", moon_name, f"Illumination: {moon_pct}%")
-        render_data_card("Lightning Distance", format_num(l_dist, 1, " mi"), l_source)
-        render_data_card("UV Index", format_num(uv_val, 0, ""), f"Solar: {format_num(solar,0,' W/m²')} · Open-Meteo")
+        render_data_card("Rain 1-hour",       format_num(n_rain_1h, 2, " in"),        "NOAH Firestore", noah=True)
+        render_data_card("Rain 24-hour",      format_num(n_rain_24h, 2, " in"),       "NOAH Firestore", noah=True)
+        render_data_card("Rain Event Total",  format_num(n_rain_event, 2, " in"),     "NOAH Firestore", noah=True)
+        render_data_card("Pressure",          format_num(n_pressure_inhg, 2, " inHg"),"NOAH Firestore", noah=True)
+        render_data_card("Water Stage",       format_num(n_stage_ft, 2, " ft"),       f"Velocity: {format_num(n_velocity_mps,2,' m/s')}", noah=True)
+
+    # Soil moisture detail
+    st.markdown("<hr class='soft'>", unsafe_allow_html=True)
+    st.markdown("<div class='data-card-title' style='color:#00FF9C;font-family:Share Tech Mono,monospace;font-size:0.72em;text-transform:uppercase;margin-bottom:6px;'>🌱 Soil Moisture Sensors</div>", unsafe_allow_html=True)
+    sm_cols = st.columns(5)
+    for i, (col, val) in enumerate(zip(sm_cols, [n_soil_1, n_soil_2, n_soil_3, n_soil_4, n_soil_5]), 1):
+        with col:
+            v_str = format_num(val, 1, "%") if val is not None else "N/A"
+            st.markdown(f"<div style='text-align:center;'><div style='font-family:Share Tech Mono,monospace;font-size:0.65em;color:#7AACCC;'>S{i}</div><div style='font-family:Rajdhani,sans-serif;font-size:1.1em;font-weight:700;color:#00FF9C;'>{v_str}</div></div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 with right:
-    st.markdown('<div class="panel"><div class="panel-title">💧 USGS / Aviation / Diagnostics</div>', unsafe_allow_html=True)
-    for site_id, item in usgs_data.items():
-        stage = item.get("stage_ft"); cfs = item.get("discharge_cfs")
-        if item["ok"]:
-            val_str    = f"{stage} ft" if stage is not None else "--"
-            detail_str = f"{int(cfs):,} cfs • Gauge {site_id} • LIVE" if cfs is not None else f"Gauge {site_id} • LIVE"
-        else:
-            val_str    = "OFFLINE"
-            detail_str = f"Gauge {site_id} • {item.get('error','')[:60]}"
-        render_data_card(f"USGS {item['name']}", val_str, detail_str)
-    render_data_card("Airport METAR", AIRPORT_ID, airport.get("raw", "No raw observation"))
-    render_data_card("Forecast Cascade", "HRRR · NWS · ECMWF", "Days 0-1 HRRR | Days 2-3 NWS | Days 4-6 ECMWF")
-    render_data_card("Soil Wetness Profile", "belk_compacted", "Compacted campus-ground assumption")
+    st.markdown('<div class="panel"><div class="panel-title">🔧 Aviation / Station Diagnostics</div>', unsafe_allow_html=True)
+    render_data_card("Airport METAR",      AIRPORT_ID, airport.get("raw", "No raw observation"))
+    render_data_card("UV Index",           format_num(uv_val, 0, ""), f"Solar: {format_num(solar,0,' W/m²')} · Open-Meteo")
+    render_data_card("Battery",            format_num(n_battery_v, 2, " V"), f"Status: {batt_label}", noah=True)
+    render_data_card("Signal Strength",    format_num(n_signal, 1, "%"), f"Status: {sig_label}", noah=True)
+    render_data_card("Device ID",         n_device_id, f"Last seen: {n_ts_str}", noah=True)
+    render_data_card("Forecast Cascade",  "HRRR · NWS · ECMWF", "Days 0-1 HRRR | Days 2-3 NWS | Days 4-6 ECMWF")
 
-    # Diagnostics
-    err_payloads = [airport_payload, om_payload, blitz_payload, aqi_payload, hist_payload]
-    if any(p.get("error") for p in err_payloads):
+    err_payloads = [airport_payload, om_payload, aqi_payload, hist_payload]
+    if any(p.get("error") for p in err_payloads) or not noah_payload["ok"]:
         st.markdown("<hr class='soft'>", unsafe_allow_html=True)
         st.markdown("<div class='data-card-title'>Diagnostics</div>", unsafe_allow_html=True)
+        if not noah_payload["ok"]:
+            st.markdown(f"<div class='small-muted'><b>NOAH FIRESTORE:</b> {noah_payload.get('error')}</div>", unsafe_allow_html=True)
         for p in err_payloads:
             if p.get("error"):
                 st.markdown(f"<div class='small-muted'><b>{p.get('source')}:</b> {p.get('error')}</div>", unsafe_allow_html=True)
