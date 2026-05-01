@@ -1,4 +1,6 @@
-streamlit>=1.35.0
-streamlit-autorefresh>=1.0.1
-plotly>=5.20.0
-google-cloud-firestore>=2.16.0
+streamlit
+pandas
+numpy
+google-cloud-storage
+google-cloud-aiplatform
+python-dotenv
